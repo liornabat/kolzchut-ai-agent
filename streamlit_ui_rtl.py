@@ -7,13 +7,10 @@ import streamlit as st
 # Set page configuration first, before any other Streamlit commands
 st.set_page_config(
     page_title="טופס 101",
-
 )
 
 from supabase import Client
 from openai import AsyncOpenAI
-
-# Import all the message part classes
 from pydantic_ai.messages import (
     ModelMessage,
     ModelRequest,
@@ -27,51 +24,41 @@ from pydantic_ai.messages import (
     ModelMessagesTypeAdapter
 )
 from ai_agent import ai_agent, AIDeps
-
-# Load environment variables
 from dotenv import load_dotenv
 
 load_dotenv()
 
+# Get message history limit from environment variable, default to 2 if not set
+MESSAGE_HISTORY_LIMIT = int(os.getenv("MESSAGE_HISTORY_LIMIT", 3))
+
 # Initialize clients
-openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"), )
+openai_client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 supabase: Client = Client(
     os.getenv("SUPABASE_URL"),
     os.getenv("SUPABASE_SERVICE_KEY")
 )
 
-# Add custom CSS for RTL support
+# Add custom CSS for RTL support (CSS remains the same)
 st.markdown("""
     <style>
-        /* Global RTL settings */
         .stApp {
             direction: rtl;
         }
-
-        /* Fix header alignment */
         .main .block-container {
             direction: rtl;
             text-align: right;
         }
-
-        /* Adjust chat messages for RTL */
         .stChatMessage {
             direction: rtl;
             text-align: right;
         }
-
-        /* Fix input field alignment */
         .stChatInputContainer {
             direction: rtl;
         }
-
-        /* Ensure Hebrew text is properly aligned */
         p, h1, h2, h3 {
             direction: rtl;
             text-align: right;
         }
-
-        /* Fix streamlit components alignment */
         div[data-testid="stMarkdownContainer"] {
             direction: rtl;
             text-align: right;
@@ -80,28 +67,25 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 
-class ChatMessage(TypedDict):
-    """Format of messages sent to the browser/API."""
-    role: Literal['user', 'model']
-    timestamp: str
-    content: str
+def maintain_message_history(messages: list) -> list:
+    """
+    Maintain only the last N messages in the chat history, where N is defined by MESSAGE_HISTORY_LIMIT.
+    """
+    if len(messages) > MESSAGE_HISTORY_LIMIT:
+        return messages[-MESSAGE_HISTORY_LIMIT:]
+    return messages
 
 
 def display_message_part(part):
     """
     Display a single part of a message in the Streamlit UI.
-    Customize how you display system prompts, user prompts,
-    tool calls, tool returns, etc.
     """
-    # system-prompt
     if part.part_kind == 'system-prompt':
         with st.chat_message("system"):
             st.markdown(f"**System**: {part.content}")
-    # user-prompt
     elif part.part_kind == 'user-prompt':
         with st.chat_message("user"):
             st.markdown(part.content)
-    # text
     elif part.part_kind == 'text':
         with st.chat_message("assistant"):
             st.markdown(part.content)
@@ -117,7 +101,7 @@ async def run_agent_with_streaming(user_input: str):
     async with ai_agent.run_stream(
             user_input,
             deps=deps,
-            message_history=st.session_state.messages[:-1],
+            message_history=st.session_state.messages,  # Using current messages
     ) as result:
         partial_text = ""
         message_placeholder = st.empty()
@@ -129,11 +113,14 @@ async def run_agent_with_streaming(user_input: str):
         filtered_messages = [msg for msg in result.new_messages()
                              if not (hasattr(msg, 'parts') and
                                      any(part.part_kind == 'user-prompt' for part in msg.parts))]
-        st.session_state.messages.extend(filtered_messages)
 
-        st.session_state.messages.append(
-            ModelResponse(parts=[TextPart(content=partial_text)])
-        )
+        # Update messages with history limit
+        new_messages = maintain_message_history(filtered_messages)
+        st.session_state.messages = new_messages
+
+        # Add the current response
+        response = ModelResponse(parts=[TextPart(content=partial_text)])
+        st.session_state.messages = maintain_message_history(st.session_state.messages + [response])
 
 
 async def main():
@@ -143,6 +130,7 @@ async def main():
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
+    # Display current messages (which will only be the last two)
     for msg in st.session_state.messages:
         if isinstance(msg, ModelRequest) or isinstance(msg, ModelResponse):
             for part in msg.parts:
@@ -151,9 +139,11 @@ async def main():
     user_input = st.chat_input("מה השאלה שלך?")
 
     if user_input:
-        st.session_state.messages.append(
-            ModelRequest(parts=[UserPromptPart(content=user_input)])
-        )
+        # Create new user message
+        new_message = ModelRequest(parts=[UserPromptPart(content=user_input)])
+
+        # Update messages list with the new message while maintaining only last two
+        st.session_state.messages = maintain_message_history(st.session_state.messages + [new_message])
 
         with st.chat_message("user"):
             st.markdown(f"<div dir='rtl'>{user_input}</div>", unsafe_allow_html=True)
